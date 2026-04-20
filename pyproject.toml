@@ -1,0 +1,130 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hpi-modules"
+version = "0.1.0"
+description = "Additional modules for karlicoss/HPI (Human Programming Interface). First module: Letterboxd."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "shchesnyak-d" }]
+keywords = ["hpi", "quantified-self", "letterboxd", "personal-data", "lifelogging"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Utilities",
+]
+
+# HPI is normally installed separately (see README), but we declare it here so
+# that `pip install` pulls it automatically and asserts API compatibility.
+dependencies = [
+    "HPI>=0.4",
+]
+
+[project.optional-dependencies]
+cache = ["cachew>=0.15"]
+tests = [
+    "pytest>=7",
+    "pytest-cov>=4",
+]
+dev = [
+    "ruff>=0.6",
+    "mypy>=1.10",
+    "types-setuptools",
+]
+
+[project.urls]
+Homepage = "https://github.com/karlicoss/HPI"
+Documentation = "https://github.com/karlicoss/HPI/blob/master/doc/MODULE_DESIGN.org"
+Issues = "https://github.com/karlicoss/HPI/issues"
+
+# ------------------------------------------------------------------ #
+# Namespace package layout                                           #
+# ------------------------------------------------------------------ #
+# This is a namespace extension for the `my.*` package (PEP 420):    #
+# `src/my` deliberately has no `__init__.py`, while the subpackage   #
+# `src/my/letterboxd` has its own `__init__.py`.                     #
+# That lets the package be installed alongside karlicoss/HPI and     #
+# other HPI overlays without clashing.                               #
+# ------------------------------------------------------------------ #
+
+[tool.setuptools]
+zip-safe = false
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["my*"]
+namespaces = true
+
+[tool.setuptools.package-data]
+"my.letterboxd" = ["py.typed"]
+
+# ------------------------------------------------------------------ #
+# Tooling                                                            #
+# ------------------------------------------------------------------ #
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+addopts = "-ra --strict-markers --strict-config"
+testpaths = ["tests"]
+xfail_strict = true
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+warn_unreachable = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+disallow_any_unimported = false
+namespace_packages = true
+explicit_package_bases = true
+mypy_path = "src"
+files = ["src/my/letterboxd"]
+
+[[tool.mypy.overrides]]
+module = ["my.core.*", "my.config", "my.config.*", "cachew.*"]
+ignore_missing_imports = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "W",   # pycodestyle / pyflakes
+    "I",             # isort
+    "B",             # bugbear
+    "UP",            # pyupgrade
+    "SIM",           # simplify
+    "RUF",           # ruff-specific
+    "PL",            # pylint subset
+    "PIE",
+    "PT",            # pytest style
+    "RET",
+    "TID",
+]
+ignore = [
+    "E501",          # length is enforced by formatter
+    "PLR2004",       # magic numbers are fine in tests / domain code
+    "PLR0913",       # many args is fine in dataclasses
+    "RUF001",        # ambiguous unicode in strings (we use Cyrillic intentionally)
+    "RUF002",        # ambiguous unicode in docstrings
+    "RUF003",        # ambiguous unicode in comments
+    "PLC0415",       # we want lazy imports inside HPI module functions
+    "TID252",        # relative imports inside the package are encouraged
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["PLR2004", "S101", "PT018"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["my"]
