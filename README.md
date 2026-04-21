@@ -66,26 +66,66 @@ This library:
 
 ## Installation
 
-### Option 1. On top of an existing HPI install (recommended)
+### Option 1. `pipx` (recommended)
+
+[`pipx`](https://pipx.pypa.io) installs the package into its own isolated
+virtualenv and exposes the CLI on your `PATH` — no clashes with system
+Python, no `--user` foot-guns.
 
 ```bash
-# 1. HPI itself
-pip install --user HPI
-
-# 2. this package (editable, so you can keep adding modules easily)
 git clone https://github.com/<your-fork>/hpi-modules.git
 cd hpi-modules
-pip install --user -e .
+
+pipx install --editable ".[cache]" --include-deps
 ```
 
-`pip install -e .` will pull in all dependencies (including `HPI`) and install
-the package in editable mode, so any change you make under
-`src/my/letterboxd/*.py` is picked up immediately.
+Two important flags:
 
-### Option 2. With all the batteries
+- `--editable` (or `-e`) — installs in editable mode, so any change you make
+  under `src/my/letterboxd/*.py` is picked up immediately;
+- `--include-deps` — exposes the `hpi` CLI that's shipped by the `HPI`
+  dependency. Without it `pipx` only installs entry points declared by
+  *this* package (we have none), so `hpi …` would not appear on your `PATH`.
+
+The `[cache]` extra is optional but recommended — it pulls in
+[`cachew`](https://github.com/karlicoss/cachew) for transparent caching.
+
+If later you want to add the test/dev tooling to the same isolated env,
+either reinstall with more extras or use `pipx inject`:
 
 ```bash
-pip install --user -e ".[cache,tests,dev]"
+pipx install --force --editable ".[cache,tests,dev]" --include-deps
+# or, additively:
+pipx inject hpi-modules pytest mypy ruff cachew
+```
+
+> **Using [`uv`](https://docs.astral.sh/uv/)?** Install `HPI` as the tool
+> (so the `hpi` binary lands on your `PATH`) and inject our package into
+> the same isolated env in editable mode:
+> ```bash
+> uv tool install HPI --with-editable ".[cache]"
+> ```
+
+### Option 2. Plain `pip` in a virtualenv
+
+If you'd rather not use `pipx`:
+
+```bash
+python3 -m venv ~/.venvs/hpi
+source ~/.venvs/hpi/bin/activate
+
+git clone https://github.com/<your-fork>/hpi-modules.git
+cd hpi-modules
+pip install -e ".[cache]"
+```
+
+This pulls in all dependencies (including `HPI`) and installs the package in
+editable mode.
+
+For local development add the `tests` and `dev` extras as well:
+
+```bash
+pip install -e ".[cache,tests,dev]"
 ```
 
 - `cache` — pulls in [`cachew`](https://github.com/karlicoss/cachew) for
@@ -386,6 +426,9 @@ LOGGING_LEVEL_my_letterboxd=warning hpi doctor my.letterboxd.export
 
 ## Development
 
+For day-to-day development a regular virtualenv is the most convenient choice
+(IDE integrations, faster iteration, no isolation tax):
+
 ```bash
 # environment
 python3 -m venv .venv
@@ -401,6 +444,13 @@ mypy
 
 # tests (CSV fixtures live under testdata/)
 pytest
+```
+
+If you prefer [`uv`](https://docs.astral.sh/uv/), the equivalent is:
+
+```bash
+uv venv
+uv pip install -e ".[cache,tests,dev]"
 ```
 
 CI runs all of the above for Python 3.10–3.13 on Linux and macOS — see
