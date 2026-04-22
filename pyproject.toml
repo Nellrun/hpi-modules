@@ -5,12 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "hpi-modules"
 version = "0.1.0"
-description = "Additional modules for karlicoss/HPI (Human Programming Interface). First module: Letterboxd."
+description = "Additional modules for karlicoss/HPI (Human Programming Interface). Ships Letterboxd and Trakt.tv."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "shchesnyak-d" }]
-keywords = ["hpi", "quantified-self", "letterboxd", "personal-data", "lifelogging"]
+keywords = ["hpi", "quantified-self", "letterboxd", "trakt", "personal-data", "lifelogging"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -66,6 +66,7 @@ namespaces = true
 
 [tool.setuptools.package-data]
 "my.letterboxd" = ["py.typed"]
+"my.trakt" = ["py.typed"]
 
 # ------------------------------------------------------------------ #
 # Tooling                                                            #
@@ -87,7 +88,7 @@ disallow_any_unimported = false
 namespace_packages = true
 explicit_package_bases = true
 mypy_path = "src"
-files = ["src/my/letterboxd"]
+files = ["src/my/letterboxd", "src/my/trakt"]
 
 [[tool.mypy.overrides]]
 module = ["my.core.*", "my.config", "my.config.*", "cachew.*"]

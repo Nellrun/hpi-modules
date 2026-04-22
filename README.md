@@ -9,6 +9,7 @@ Currently shipping:
 | Module                         | Description                                                              |
 | ------------------------------ | ------------------------------------------------------------------------ |
 | [`my.letterboxd`](#letterboxd) | Diary entries, ratings, reviews, watchlist and likes from Letterboxd     |
+| [`my.trakt`](#trakt)           | History, ratings, watchlist, likes, followers/following from Trakt.tv    |
 
 The repository is organised as a **namespace package** (PEP 420), so it
 co-exists peacefully with the upstream `karlicoss/HPI` and any other HPI
@@ -31,6 +32,13 @@ More integrations are planned — the project layout, tooling
   - [Public API](#public-api)
   - [Domain model](#domain-model)
   - [Usage examples](#usage-examples)
+- [Trakt](#trakt)
+  - [Step 1. Produce a snapshot](#step-1-produce-a-snapshot)
+  - [Step 2. Configure `my.config`](#step-2-configure-myconfig-trakt)
+  - [Step 3. Verify the setup](#step-3-verify-the-setup-trakt)
+  - [Public API (`my.trakt`)](#public-api-mytrakt)
+  - [Domain model (`my.trakt.common`)](#domain-model-mytraktcommon)
+  - [Usage examples (`my.trakt`)](#usage-examples-mytrakt)
 - [CLI: `hpi query`](#cli-hpi-query)
 - [Caching (cachew)](#caching-cachew)
 - [Logging](#logging)
@@ -381,6 +389,248 @@ from my.letterboxd.all import watchlist
 
 ---
 
+## Trakt
+
+Exposes everything [`traktexport`](https://github.com/purarue/traktexport)
+dumps from your Trakt.tv account — full watch **history**, **ratings**,
+**watchlist**, liked lists and comments, **followers** / **following**, plus
+the raw aggregate **stats** Trakt keeps about you.
+
+Unlike the Letterboxd CSV archive, a Trakt export is the full account state in
+a single JSON file. It's also token-based (OAuth2 with a rotating refresh
+token), so dumps are usually produced by a scheduled job rather than a manual
+download. The recommended driver for that is
+[`hpi-harvester`](https://github.com/shchesnyak-d/hpi-harvester) — it runs
+`traktexport export <user>` on cron and drops snapshots into a well-known
+layout that every HPI module in this repo can pick up automatically.
+
+### Step 1. Produce a snapshot
+
+Any of these layouts works — the module reads them all via
+[`my.harvester.snapshot()`](src/my/harvester.py):
+
+```bash
+# A — via hpi-harvester (recommended: one data root for everything)
+<harvester-root>/
+└── trakt/
+    ├── 2024-03-15T03-00-00.json
+    ├── 2024-04-06T03-00-00.json
+    └── _index.json
+
+# B — a classic karlicoss/HPI glob
+~/data/trakt/
+├── trakt-2024-03-15.json
+└── trakt-2024-04-06.json
+```
+
+For layout (A), see `hpi-harvester`'s README — you set it up once, and it
+produces timestamped JSON snapshots on whatever schedule you like. For layout
+(B), just run `traktexport export <user> > ~/data/trakt/<date>.json` yourself.
+
+Either way, **the module always consumes the most recent snapshot**. Old
+snapshots are kept around so cachew can notice when a new one lands.
+
+### Step 2. Configure `my.config` <a id="step-2-configure-myconfig-trakt"></a>
+
+Pick one of the two shapes, depending on which layout you went with above:
+
+```python
+# ~/.config/my/my/config/__init__.py
+
+# Layout A — harvester-powered (shared root for every HPI module)
+class harvester:
+    root = '/path/to/hpi-harvester/data'
+
+# Layout B — classic glob (you produce the JSON yourself)
+class trakt:
+    export_path = '~/data/trakt/*.json'
+```
+
+If your harvester YAML renames the exporter (e.g. `name: trakt_mine`), point
+the module at that name explicitly:
+
+```python
+class trakt:
+    harvester_name = 'trakt_mine'
+```
+
+### Step 3. Verify the setup <a id="step-3-verify-the-setup-trakt"></a>
+
+```bash
+hpi doctor my.trakt.export
+hpi doctor my.trakt.all
+```
+
+Expected output:
+
+```
+✅  OK  : my.trakt.export
+        - history   : 4217
+        - ratings   : 812
+        - watchlist : 94
+        - likes     : 13
+        - followers : 3
+        - following : 5
+```
+
+As with the Letterboxd module, debug logging is opt-in:
+
+```bash
+LOGGING_LEVEL_my_trakt=debug hpi doctor my.trakt.export
+```
+
+### Public API (`my.trakt`)
+
+```python
+# Low-level source (reads the latest traktexport dump):
+from my.trakt import export
+
+export.history()        # Iterator[Res[HistoryEntry]]  — every watch event
+export.ratings()        # Iterator[Res[Rating]]        — your ratings
+export.watchlist()      # Iterator[Res[WatchListEntry]]
+export.likes()          # Iterator[Res[Like]]          — liked lists + comments
+export.followers()      # Iterator[Res[Follow]]
+export.following()      # Iterator[Res[Follow]]
+export.profile_stats()  # dict[str, Any]               — raw Trakt stats blob
+export.export()         # FullTraktExport              — one-shot typed bundle
+export.inputs()         # Sequence[Path]               — discovered snapshots
+
+# The combined "facade" — preferred entry point for end-user scripts:
+from my.trakt.all import (
+    history, ratings, watchlist, likes, followers, following, profile_stats,
+)
+```
+
+As in every HPI module, `Res[T]` is `T | Exception` — one broken row never
+kills the stream.
+
+### Domain model (`my.trakt.common`)
+
+Every type is a frozen dataclass. Media-carrying entities form a small tagged
+union — the string `media_type` tells you which concrete class is in
+`media_data`.
+
+```python
+@dataclass(frozen=True, slots=True)
+class SiteIds:
+    trakt_id: int
+    trakt_slug: str | None = None
+    imdb_id: str | None = None
+    tmdb_id: int | None = None
+    tvdb_id: int | None = None
+    tvrage_id: int | None = None
+
+@dataclass(frozen=True, slots=True)
+class Movie:   title: str; year: int | None; ids: SiteIds
+@dataclass(frozen=True, slots=True)
+class Show:    title: str; year: int | None; ids: SiteIds
+@dataclass(frozen=True, slots=True)
+class Season:  season: int; ids: SiteIds; show: Show
+@dataclass(frozen=True, slots=True)
+class Episode: title: str | None; season: int; episode: int; ids: SiteIds; show: Show
+
+@dataclass(frozen=True, slots=True)
+class HistoryEntry:
+    history_id: int
+    watched_at: datetime
+    action: str                              # 'scrobble' | 'watch' | 'checkin' | …
+    media_type: Literal['movie', 'episode']
+    media_data: Movie | Episode
+
+@dataclass(frozen=True, slots=True)
+class Rating:
+    rated_at: datetime
+    rating: int                              # 1..10
+    media_type: Literal['movie', 'show', 'season', 'episode']
+    media_data: Movie | Show | Season | Episode
+
+@dataclass(frozen=True, slots=True)
+class WatchListEntry:
+    listed_at: datetime
+    listed_at_id: int
+    media_type: Literal['movie', 'show']
+    media_data: Movie | Show
+
+@dataclass(frozen=True, slots=True)
+class Like:
+    liked_at: datetime
+    media_type: Literal['list', 'comment']
+    media_data: TraktList | Comment
+
+@dataclass(frozen=True, slots=True)
+class Follow: followed_at: datetime; username: str
+```
+
+### Usage examples (`my.trakt`)
+
+#### Watch history by weekday
+
+```python
+from collections import Counter
+from my.trakt.all import history
+
+days = Counter(
+    e.watched_at.strftime('%A')
+    for e in history()
+    if not isinstance(e, Exception)
+)
+for day, count in days.most_common():
+    print(f"{day:<10}  {count}")
+```
+
+#### Top-rated shows
+
+```python
+from my.trakt.all import ratings
+from my.trakt.common import Show
+
+top_shows = sorted(
+    (r for r in ratings() if not isinstance(r, Exception) and isinstance(r.media_data, Show)),
+    key=lambda r: (r.rating, r.rated_at),
+    reverse=True,
+)
+for r in top_shows[:10]:
+    print(f"{r.rating:>2}  {r.media_data.title} ({r.media_data.year})")
+```
+
+#### Things I still want to watch, grouped by type
+
+```python
+from collections import defaultdict
+from my.trakt.all import watchlist
+
+by_type: dict[str, list[str]] = defaultdict(list)
+for w in watchlist():
+    if isinstance(w, Exception):
+        continue
+    by_type[w.media_type].append(w.media_data.title)
+
+for kind, titles in by_type.items():
+    print(f"{kind.upper()}  ({len(titles)})")
+    for t in titles:
+        print(f"  - {t}")
+```
+
+#### Cross-source: Letterboxd diary meets Trakt ratings
+
+Trakt carries `imdb` / `tmdb` ids out of the box, which makes it trivial to
+join with any other source that also knows IMDB ids:
+
+```python
+from my.letterboxd.all import diary
+from my.trakt.all import ratings
+from my.trakt.common import Movie
+
+trakt_by_imdb = {
+    r.media_data.ids.imdb_id: r.rating
+    for r in ratings()
+    if not isinstance(r, Exception) and isinstance(r.media_data, Movie)
+}
+# …match against Letterboxd entries via film.slug / film.uri
+```
+
+---
+
 ## CLI: `hpi query`
 
 HPI ships with a built-in JSON query interface — no code required:
@@ -394,17 +644,30 @@ hpi query my.letterboxd.all.reviews --stream > reviews.jsonl
 
 # watchlist items added in the last year:
 hpi query my.letterboxd.all.watchlist --order-type datetime --recent 365d
+
+# last ten Trakt watch events:
+hpi query my.trakt.all.history --order-type datetime --limit 10
+
+# all Trakt ratings of 10, streamed as JSONL:
+hpi query my.trakt.all.ratings --stream | jq 'select(.rating == 10)'
 ```
 
 ---
 
 ## Caching (cachew)
 
-If `cachew` is installed (`pip install -e ".[cache]"`), the
-`diary()`, `ratings()`, `watched()`, `watchlist()`, `reviews()` and `likes()`
-functions are cached automatically. The cache is invalidated based on the
-contents of `inputs()`, so dropping in a fresh export will rebuild the cache
-on the next call.
+If `cachew` is installed (`pip install -e ".[cache]"`), the per-entity streams
+are cached automatically:
+
+- Letterboxd: `diary()`, `ratings()`, `watched()`, `watchlist()`, `reviews()`,
+  `likes()`.
+- Trakt: `history()`, `ratings()`, `likes()`, `followers()`, `following()`.
+  `watchlist()` is intentionally *not* cached — it's tiny and its tagged-union
+  shape trips cachew's schema inference, matching the same decision in
+  [`purarue/HPI`](https://github.com/purarue/HPI).
+
+The cache is invalidated based on the mtime of every path in `inputs()`, so
+dropping in a fresh export rebuilds the cache on the next call.
 
 For where the cache lives and how to tune it, see
 [HPI SETUP](https://github.com/karlicoss/HPI/blob/master/doc/SETUP.org).
@@ -420,6 +683,7 @@ with dots replaced by underscores:
 ```bash
 LOGGING_LEVEL_my_letterboxd=debug   hpi query my.letterboxd.all.diary
 LOGGING_LEVEL_my_letterboxd=warning hpi doctor my.letterboxd.export
+LOGGING_LEVEL_my_trakt=debug        hpi query my.trakt.all.history
 ```
 
 ---
@@ -464,18 +728,28 @@ CI runs all of the above for Python 3.10–3.13 on Linux and macOS — see
 ├── README.md
 ├── src/
 │   └── my/                          # namespace package (no __init__.py here!)
-│       └── letterboxd/
+│       ├── harvester.py             # shared snapshot discovery helper
+│       ├── letterboxd/
+│       │   ├── __init__.py
+│       │   ├── common.py            # models + helpers (CSV / ZIP)
+│       │   ├── export.py            # parser of the official export
+│       │   ├── all.py               # facade for plugging in extra sources
+│       │   └── py.typed
+│       └── trakt/
 │           ├── __init__.py
-│           ├── common.py            # models + helpers (CSV / ZIP)
-│           ├── export.py            # parser of the official export
+│           ├── common.py            # dataclasses + JSON parsers
+│           ├── export.py            # harvester-driven source
 │           ├── all.py               # facade for plugging in extra sources
 │           └── py.typed
 ├── tests/
 │   ├── conftest.py                  # fixtures with a fake my.config.letterboxd
 │   ├── test_common.py               # unit tests for value parsers
-│   └── test_export.py               # integration tests for CSV/ZIP
+│   ├── test_export.py               # integration tests for CSV/ZIP
+│   ├── test_harvester.py            # snapshot-discovery helper
+│   └── test_trakt.py                # my.trakt unit + integration tests
 ├── testdata/
-│   └── letterboxd-export-sample/    # small but realistic export
+│   ├── letterboxd-export-sample/    # small but realistic CSV/ZIP
+│   └── trakt-export-sample.json     # realistic Trakt dump
 └── .github/workflows/ci.yml
 ```
 

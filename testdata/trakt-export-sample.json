@@ -1,0 +1,192 @@
+{
+  "type": "full",
+  "username": "nellrun",
+  "followers": [
+    {
+      "followed_at": "2023-06-12T10:00:00.000Z",
+      "user": {"username": "friend_one"}
+    }
+  ],
+  "following": [
+    {
+      "followed_at": "2023-07-01T14:22:00.000Z",
+      "user": {"username": "friend_two"}
+    }
+  ],
+  "stats": {
+    "movies": {"plays": 42, "watched": 40, "minutes": 4200},
+    "shows": {"watched": 5},
+    "episodes": {"plays": 100, "watched": 95, "minutes": 4500}
+  },
+  "settings": {
+    "user": {"username": "nellrun", "name": "Test User"},
+    "account": {"timezone": "Europe/Madrid"}
+  },
+  "likes": [
+    {
+      "liked_at": "2024-01-15T12:30:00.000Z",
+      "type": "list",
+      "list": {
+        "name": "Best films of 2023",
+        "description": "A curated pick",
+        "created_at": "2023-12-31T00:00:00.000Z",
+        "updated_at": "2024-01-10T00:00:00.000Z",
+        "likes": 12,
+        "user": {"username": "curator"}
+      }
+    },
+    {
+      "liked_at": "2024-02-20T09:45:00.000Z",
+      "type": "comment",
+      "comment": {
+        "id": 5551234,
+        "comment": "Great episode!",
+        "created_at": "2024-02-19T23:10:00.000Z",
+        "updated_at": "2024-02-19T23:10:00.000Z",
+        "likes": 3,
+        "user": {"username": "commenter"}
+      }
+    }
+  ],
+  "watchlist": [
+    {
+      "id": 9001,
+      "rank": 1,
+      "listed_at": "2024-03-01T18:00:00.000Z",
+      "type": "movie",
+      "movie": {
+        "title": "Dune: Part Two",
+        "year": 2024,
+        "ids": {
+          "trakt": 617481,
+          "slug": "dune-part-two-2024",
+          "imdb": "tt15239678",
+          "tmdb": 693134
+        }
+      }
+    },
+    {
+      "id": 9002,
+      "rank": 2,
+      "listed_at": "2024-03-10T09:00:00.000Z",
+      "type": "show",
+      "show": {
+        "title": "Shogun",
+        "year": 2024,
+        "ids": {
+          "trakt": 198123,
+          "slug": "shogun-2024",
+          "imdb": "tt2788316",
+          "tmdb": 86123,
+          "tvdb": 379213
+        }
+      }
+    }
+  ],
+  "ratings": [
+    {
+      "rated_at": "2023-04-01T20:00:00.000Z",
+      "rating": 9,
+      "type": "movie",
+      "movie": {
+        "title": "Parasite",
+        "year": 2019,
+        "ids": {
+          "trakt": 308974,
+          "slug": "parasite-2019",
+          "imdb": "tt6751668",
+          "tmdb": 496243
+        }
+      }
+    },
+    {
+      "rated_at": "2023-05-11T21:15:00.000Z",
+      "rating": 10,
+      "type": "episode",
+      "show": {
+        "title": "Breaking Bad",
+        "year": 2008,
+        "ids": {
+          "trakt": 1388,
+          "slug": "breaking-bad",
+          "imdb": "tt0903747",
+          "tmdb": 1396,
+          "tvdb": 81189
+        }
+      },
+      "episode": {
+        "season": 5,
+        "number": 14,
+        "title": "Ozymandias",
+        "ids": {
+          "trakt": 73640,
+          "imdb": "tt2301451",
+          "tmdb": 62161,
+          "tvdb": 4541017
+        }
+      }
+    }
+  ],
+  "history": [
+    {
+      "id": 12345678,
+      "watched_at": "2024-04-01T22:30:00.000Z",
+      "action": "scrobble",
+      "type": "movie",
+      "movie": {
+        "title": "Parasite",
+        "year": 2019,
+        "ids": {
+          "trakt": 308974,
+          "slug": "parasite-2019",
+          "imdb": "tt6751668",
+          "tmdb": 496243
+        }
+      }
+    },
+    {
+      "id": 12345679,
+      "watched_at": "2024-04-02T19:00:00.000Z",
+      "action": "watch",
+      "type": "episode",
+      "show": {
+        "title": "Breaking Bad",
+        "year": 2008,
+        "ids": {
+          "trakt": 1388,
+          "slug": "breaking-bad",
+          "imdb": "tt0903747",
+          "tmdb": 1396,
+          "tvdb": 81189
+        }
+      },
+      "episode": {
+        "season": 1,
+        "number": 1,
+        "title": "Pilot",
+        "ids": {
+          "trakt": 73641,
+          "imdb": "tt0959621",
+          "tmdb": 62085,
+          "tvdb": 349232
+        }
+      }
+    },
+    {
+      "id": 12345680,
+      "watched_at": "2024-04-05T20:45:00.000Z",
+      "action": "checkin",
+      "type": "movie",
+      "movie": {
+        "title": "Dune",
+        "year": 2021,
+        "ids": {
+          "trakt": 335055,
+          "slug": "dune-2021",
+          "imdb": "tt1160419",
+          "tmdb": 438631
+        }
+      }
+    }
+  ]
+}
