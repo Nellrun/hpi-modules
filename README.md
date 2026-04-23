@@ -39,6 +39,13 @@ More integrations are planned — the project layout, tooling
   - [Public API (`my.trakt`)](#public-api-mytrakt)
   - [Domain model (`my.trakt.common`)](#domain-model-mytraktcommon)
   - [Usage examples (`my.trakt`)](#usage-examples-mytrakt)
+- [PS-Timetracker](#ps-timetracker)
+  - [Step 1. Produce a snapshot](#step-1-produce-a-snapshot-pst)
+  - [Step 2. Configure `my.config`](#step-2-configure-myconfig-pst)
+  - [Step 3. Verify the setup](#step-3-verify-the-setup-pst)
+  - [Public API (`my.ps_timetracker`)](#public-api-mypstimetracker)
+  - [Domain model (`my.ps_timetracker.common`)](#domain-model-mypstimetrackercommon)
+  - [Usage examples (`my.ps_timetracker`)](#usage-examples-mypstimetracker)
 - [CLI: `hpi query`](#cli-hpi-query)
 - [Caching (cachew)](#caching-cachew)
 - [Logging](#logging)
@@ -627,6 +634,208 @@ trakt_by_imdb = {
     if not isinstance(r, Exception) and isinstance(r.media_data, Movie)
 }
 # …match against Letterboxd entries via film.slug / film.uri
+```
+
+---
+
+## PS-Timetracker
+
+Exposes PlayStation gaming activity scraped from
+[ps-timetracker.com](https://ps-timetracker.com), an unofficial tracker that
+observes PSN friend-presence (no PSN password or NPSSO required). For each
+account it gives you:
+
+- **sessions** — every playtime row the bot observed (start, end, duration,
+  game, platform);
+- **library** — per-game aggregates from the profile landing page (total
+  hours, session count, average session, last played).
+
+ps-timetracker has no public API — everything is HTML. The
+[`ps_timetracker_export`](https://github.com/shchesnyak-d/hpi-harvester)
+exporter in `hpi-harvester` handles the scraping (cookie-based auth,
+incremental pagination, deduped `playtime_id` keys) and drops durable
+snapshots on disk. This module consumes those snapshots.
+
+### Step 1. Produce a snapshot <a id="step-1-produce-a-snapshot-pst"></a>
+
+Unlike Letterboxd/Trakt, ps-timetracker snapshots are **directories**, not
+single files. Each run writes:
+
+```
+<harvester-root>/
+└── ps_timetracker/
+    ├── 2024-04-05T03-00-00/
+    │   ├── sessions.jsonl    # one session object per line
+    │   ├── library.json      # per-game aggregates
+    │   ├── meta.json         # fetched_at_utc, profile, cursor
+    │   └── raw/              # original HTML, kept for debugging
+    ├── 2024-04-06T03-00-00/
+    │   └── …
+    └── _index.json
+```
+
+See `hpi-harvester`'s README for setup — you configure the profile name and
+`_my_app_session` cookie once, then cron produces timestamped directories
+on whatever schedule you pick. Multiple snapshots over time are normal and
+expected: if the user edits a session on ps-timetracker.com, a later
+snapshot carries the new version and the module automatically prefers it.
+
+### Step 2. Configure `my.config` <a id="step-2-configure-myconfig-pst"></a>
+
+```python
+# ~/.config/my/my/config/__init__.py
+
+# Recommended — harvester-powered (shared root for every HPI module)
+class harvester:
+    root = '/path/to/hpi-harvester/data'
+
+# Or: point at a directory that already holds timestamped snapshot
+# subdirectories in the harvester layout:
+class ps_timetracker:
+    export_path = '~/data/ps_timetracker'
+```
+
+If your harvester YAML renames the exporter (e.g. `name: ps_timetracker_mine`),
+override the source name explicitly:
+
+```python
+class ps_timetracker:
+    harvester_name = 'ps_timetracker_mine'
+```
+
+### Step 3. Verify the setup <a id="step-3-verify-the-setup-pst"></a>
+
+```bash
+hpi doctor my.ps_timetracker.export
+hpi doctor my.ps_timetracker.all
+```
+
+Expected output:
+
+```
+✅  OK  : my.ps_timetracker.export
+        - sessions : 1842
+        - library  : 137
+```
+
+Debug logging is opt-in:
+
+```bash
+LOGGING_LEVEL_my_ps_timetracker=debug hpi doctor my.ps_timetracker.export
+```
+
+### Public API (`my.ps_timetracker`)
+
+```python
+# Low-level source (merges every snapshot, dedupes by playtime_id):
+from my.ps_timetracker import export
+
+export.sessions()   # Iterator[Res[Session]]  — every session, chronologically
+export.library()    # Library                 — latest-snapshot aggregate view
+export.inputs()     # Sequence[Path]          — discovered snapshot directories
+
+# The combined "facade" — preferred entry point for end-user scripts:
+from my.ps_timetracker.all import sessions, library
+```
+
+As in every HPI module, `Res[T]` is `T | Exception` — one broken row never
+kills the stream.
+
+**Timezone note.** ps-timetracker renders every timestamp in the account's
+local timezone without any tz tag; the parsers therefore return **naive**
+`datetime` objects (`start_local`, `end_local`, `last_played_local`).
+Localise them to a concrete tz in your downstream code if you need to
+compare across sources.
+
+**Deduplication.** `sessions()` iterates every snapshot on disk and keeps
+one row per `playtime_id`, with later snapshots superseding earlier ones.
+That means a user edit on ps-timetracker.com (fixing a game title, trimming
+a mis-detected session) flows through transparently as soon as the next
+scrape runs.
+
+### Domain model (`my.ps_timetracker.common`)
+
+All types are frozen dataclasses.
+
+```python
+@dataclass(frozen=True, slots=True)
+class Session:
+    playtime_id: int                 # stable primary key (dedup key)
+    game_id: str | None              # PSN content id, e.g. "PPSA02530_00"
+    game_title: str | None
+    platform: str | None             # "PS5" | "PS4" | "PS3" | "PSVITA"
+    duration: timedelta | None       # wall-clock — may be < end - start
+    start_local: datetime | None     # naive, account-local tz
+    end_local: datetime | None
+
+@dataclass(frozen=True, slots=True)
+class LibraryGame:
+    rank: int | None
+    game_id: str | None
+    title: str | None
+    platform: str | None
+    total_duration: timedelta | None
+    total_duration_text: str | None  # e.g. "32:05 hours" — kept verbatim
+    sessions_count: int | None
+    avg_session: timedelta | None
+    avg_session_text: str | None
+    last_played_local: datetime | None
+
+@dataclass(frozen=True, slots=True)
+class Library:
+    fetched_at_utc: datetime | None
+    profile: str | None
+    games: tuple[LibraryGame, ...]
+```
+
+### Usage examples (`my.ps_timetracker`)
+
+#### Hours played by game, this month
+
+```python
+from collections import defaultdict
+from datetime import datetime
+from my.ps_timetracker.all import sessions
+
+cutoff = datetime(2024, 4, 1)
+hours: dict[str, float] = defaultdict(float)
+for s in sessions():
+    if isinstance(s, Exception) or s.start_local is None or s.duration is None:
+        continue
+    if s.start_local < cutoff:
+        continue
+    hours[s.game_title or '?'] += s.duration.total_seconds() / 3600
+
+for title, h in sorted(hours.items(), key=lambda kv: kv[1], reverse=True):
+    print(f"{h:6.1f}h  {title}")
+```
+
+#### "What's in my PS library" snapshot
+
+```python
+from my.ps_timetracker.all import library
+
+lib = library()
+print(f"{len(lib.games)} games, snapshot at {lib.fetched_at_utc}")
+for g in lib.games[:10]:
+    h = g.total_duration.total_seconds() / 3600 if g.total_duration else 0
+    print(f"  {g.rank:>3}. {g.title:<40} {h:6.1f}h  ({g.sessions_count} sessions)")
+```
+
+#### Cross-source: gaming vs. listening on the same day
+
+```python
+from collections import defaultdict
+from my.ps_timetracker.all import sessions
+from my.lastfm.all import scrobbles  # only if you have my.lastfm configured
+
+gaming_hours: dict[str, float] = defaultdict(float)
+for s in sessions():
+    if isinstance(s, Exception) or s.start_local is None or s.duration is None:
+        continue
+    day = s.start_local.date().isoformat()
+    gaming_hours[day] += s.duration.total_seconds() / 3600
+# …join with scrobble counts per day and plot.
 ```
 
 ---

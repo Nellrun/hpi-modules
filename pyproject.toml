@@ -67,6 +67,7 @@ namespaces = true
 [tool.setuptools.package-data]
 "my.letterboxd" = ["py.typed"]
 "my.trakt" = ["py.typed"]
+"my.ps_timetracker" = ["py.typed"]
 
 # ------------------------------------------------------------------ #
 # Tooling                                                            #
@@ -88,7 +89,7 @@ disallow_any_unimported = false
 namespace_packages = true
 explicit_package_bases = true
 mypy_path = "src"
-files = ["src/my/letterboxd", "src/my/trakt"]
+files = ["src/my/letterboxd", "src/my/trakt", "src/my/ps_timetracker"]
 
 [[tool.mypy.overrides]]
 module = ["my.core.*", "my.config", "my.config.*", "cachew.*"]
