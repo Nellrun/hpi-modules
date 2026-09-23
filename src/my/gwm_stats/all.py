@@ -8,7 +8,7 @@ against the aggregator API, or alternative archives) can plug in via
 
 Usage::
 
-    from my.gwm_stats.all import sessions, trophies, summary
+    from my.gwm_stats.all import games, sessions, trophies, summary
 
     for s in sessions():
         if isinstance(s, Exception):
@@ -25,7 +25,7 @@ from collections.abc import Iterator
 from my.core import Res, Stats, stat
 from my.core.source import import_source
 
-from .common import Session, Summary, Trophy
+from .common import Game, Session, Summary, Trophy
 
 _export_src = import_source(module_name="my.gwm_stats.export")
 
@@ -52,6 +52,12 @@ def trophies() -> Iterator[Res[Trophy]]:
     yield from _export_trophies()
 
 
+def games() -> Iterator[Game]:
+    from . import export
+
+    yield from export.games()
+
+
 def summary() -> Summary:
     from . import export
 
@@ -66,6 +72,7 @@ def stats() -> Stats:
 
 
 __all__ = [
+    "games",
     "sessions",
     "stats",
     "summary",

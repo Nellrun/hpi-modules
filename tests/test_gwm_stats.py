@@ -11,7 +11,6 @@ from pathlib import Path
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -153,6 +152,60 @@ def _full_payload(**overrides) -> dict:
     return base
 
 
+def _game_row(**overrides) -> dict:
+    base: dict = {
+        "title_id": "steam:238960",
+        "title_name": "Path of Exile",
+        "source": "steam",
+        "sources": ["psn", "steam"],
+        "total_seconds": 4878686,
+        "observed_seconds": 0,
+        "sessions": 0,
+        "play_count": 13,
+        "players": 1,
+        "lastPlayedAt": "2024-11-21T22:15:37.550Z",
+        "igdb_game_id": 1911,
+        "coverUrl": "https://images.igdb.com/igdb/image/upload/t_original/co1n6w.jpg",
+        "iconUrl": "/api/game-artwork/2710/icon-1778.ico",
+        "editionSlug": None,
+        "platforms": [
+            {"source": "steam", "total_seconds": 4868460},
+            {"source": "psn", "total_seconds": 10226},
+        ],
+    }
+    base.update(overrides)
+    return base
+
+
+def _envelope_payload(
+    *,
+    sessions: list[dict] | None = None,
+    trophies: list[dict] | None = None,
+    games: list[dict] | None = None,
+    include_trophies: bool = True,
+) -> dict:
+    """Current exporter layout: per-endpoint sections bundled together."""
+    profile = _full_payload(gameTotal=422, trophyTotal=5869, platinumTotal=8)
+    profile["totals"] = {**profile["totals"], "active_days": 90}
+    # /api/player truncates these to a single page.
+    profile["sessionsLog"] = []
+    profile["trophies"] = [_trophy_row(trophy_id=1)]
+    payload: dict = {
+        "fetched_at": "2026-09-23T10:32:20.217479+00:00",
+        "name": "Nellrun",
+        "aliases": [],
+        "profile": profile,
+        "activity": {
+            "section": "activity",
+            "sessionsLog": [_session_row()] if sessions is None else sessions,
+        },
+        "games": [_game_row()] if games is None else games,
+    }
+    if include_trophies:
+        payload["trophies"] = [_trophy_row()] if trophies is None else trophies
+    return payload
+
+
 # ---------------------------------------------------------------------------
 # common.py — pure parsers
 # ---------------------------------------------------------------------------
@@ -208,6 +261,28 @@ class TestCommon:
         t = parse_totals(None)
         assert t.total_duration is None
         assert t.sessions_count is None
+
+    def test_parse_game(self) -> None:
+        from my.gwm_stats.common import parse_game
+
+        g = parse_game(_game_row())
+        assert g.title_id == "steam:238960"
+        assert g.sources == ("psn", "steam")
+        assert g.total_duration == timedelta(seconds=4878686)
+        assert g.observed_duration == timedelta(0)
+        assert g.play_count == 13
+        assert g.igdb_game_id == 1911
+        assert g.last_played_at == datetime(2024, 11, 21, 22, 15, 37, 550000, tzinfo=timezone.utc)
+        assert [(p.source, p.total_duration) for p in g.platforms] == [
+            ("steam", timedelta(seconds=4868460)),
+            ("psn", timedelta(seconds=10226)),
+        ]
+
+    def test_parse_game_missing_title_id(self) -> None:
+        from my.gwm_stats.common import GwmStatsParseError, parse_game
+
+        with pytest.raises(GwmStatsParseError):
+            parse_game(_game_row(title_id=None))
 
 
 # ---------------------------------------------------------------------------
@@ -267,9 +342,7 @@ class TestExportViaHarvester:
         # Chronological order
         assert result[0].started_at < result[1].started_at
 
-    def test_trophies_dedup_and_sort(
-        self, fake_config: types.ModuleType, tmp_path: Path
-    ) -> None:
+    def test_trophies_dedup_and_sort(self, fake_config: types.ModuleType, tmp_path: Path) -> None:
         _set_harvester_root(fake_config, tmp_path)
         t1 = _trophy_row(trophy_id=36, earned_at="2026-06-21T20:45:43.000Z")
         t2 = _trophy_row(
@@ -332,3 +405,91 @@ class TestExportViaHarvester:
         ok = [r for r in results if not isinstance(r, Exception)]
         assert len(errors) >= 1
         assert len(ok) >= 1  # the good snapshot still parsed
+
+
+class TestEnvelopeSnapshots:
+    """Snapshots written after the site split ``/api/player`` into per-tab
+    endpoints, mixed with legacy ones."""
+
+    def test_sessions_come_from_activity_and_merge_with_legacy(
+        self, fake_config: types.ModuleType, tmp_path: Path
+    ) -> None:
+        _set_harvester_root(fake_config, tmp_path)
+        legacy = _session_row(
+            title_id="PPSA10664_00",
+            started_at="2026-06-18T15:31:57.895Z",
+            observed_seconds=4323,
+        )
+        _write_snapshot(tmp_path, "2026-06-20T03-00-00", _full_payload(sessionsLog=[legacy]))
+        _write_snapshot(
+            tmp_path,
+            "2026-09-23T10-32-03",
+            _envelope_payload(sessions=[legacy, _session_row()]),
+        )
+
+        from my.gwm_stats import export
+
+        result = [s for s in export.sessions() if not isinstance(s, Exception)]
+        assert [s.title_id for s in result] == ["PPSA10664_00", "CUSA18774_00"]
+
+    def test_trophies_use_full_log(self, fake_config: types.ModuleType, tmp_path: Path) -> None:
+        _set_harvester_root(fake_config, tmp_path)
+        _write_snapshot(
+            tmp_path,
+            "2026-09-23T10-32-03",
+            _envelope_payload(trophies=[_trophy_row(trophy_id=36), _trophy_row(trophy_id=37)]),
+        )
+
+        from my.gwm_stats import export
+
+        rows = [t for t in export.trophies() if not isinstance(t, Exception)]
+        # Not profile's truncated page (trophy_id=1).
+        assert sorted(t.trophy_id for t in rows) == [36, 37]
+
+    def test_trophies_fall_back_to_profile_page(
+        self, fake_config: types.ModuleType, tmp_path: Path
+    ) -> None:
+        _set_harvester_root(fake_config, tmp_path)
+        _write_snapshot(tmp_path, "2026-09-23T10-32-03", _envelope_payload(include_trophies=False))
+
+        from my.gwm_stats import export
+
+        rows = [t for t in export.trophies() if not isinstance(t, Exception)]
+        assert [t.trophy_id for t in rows] == [1]
+
+    def test_summary_reads_profile(self, fake_config: types.ModuleType, tmp_path: Path) -> None:
+        _set_harvester_root(fake_config, tmp_path)
+        _write_snapshot(tmp_path, "2026-09-23T10-32-03", _envelope_payload())
+
+        from my.gwm_stats import export
+
+        s = export.summary()
+        assert s.fetched_at_utc == datetime(2026, 9, 23, 10, 32, 20, 217479, tzinfo=timezone.utc)
+        assert s.name == "Nellrun"
+        assert s.totals.sessions_count == 16
+        assert s.totals.active_days == 90
+        assert [p.source for p in s.platform_breakdown] == ["psn", "steam"]
+        assert (s.game_total, s.trophy_total, s.platinum_total) == (422, 5869, 8)
+
+    def test_games_from_latest_snapshot(
+        self, fake_config: types.ModuleType, tmp_path: Path
+    ) -> None:
+        _set_harvester_root(fake_config, tmp_path)
+        _write_snapshot(
+            tmp_path, "2026-09-22T03-00-00", _envelope_payload(games=[_game_row(title_id="old")])
+        )
+        _write_snapshot(tmp_path, "2026-09-23T10-32-03", _envelope_payload())
+
+        from my.gwm_stats import export
+
+        assert [g.title_id for g in export.games()] == ["steam:238960"]
+
+    def test_games_empty_for_legacy_snapshot(
+        self, fake_config: types.ModuleType, tmp_path: Path
+    ) -> None:
+        _set_harvester_root(fake_config, tmp_path)
+        _write_snapshot(tmp_path, "2026-06-21T03-00-00", _full_payload())
+
+        from my.gwm_stats import export
+
+        assert list(export.games()) == []

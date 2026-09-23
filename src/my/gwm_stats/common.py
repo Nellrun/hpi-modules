@@ -1,23 +1,25 @@
 """
 Shared domain models and JSON parsers for ``my.gwm_stats``.
 
-Each ``gwm-stats-export`` run writes one JSON file with the full
-``/api/player`` response. The top-level shape we rely on::
+Each ``gwm-stats-export`` run writes one JSON file. Since the site
+(gowithme.club) split its monolithic ``/api/player`` into per-tab
+endpoints, the exporter bundles them into one envelope::
 
     {
+      "fetched_at": str,          # ISO-8601, stamped by the exporter
       "name": str,
-      "memberCount": int | null,
-      "playerName": str | null,
-      "isSelf": bool | null,
-      "totals": { ... aggregate counters ... },
-      "topGames": [ ... per-game aggregates ... ],
-      "byWeekday": [ ... ],
-      "byMonth": [ ... ],
-      "peakDay": { ... } | null,
-      "platformBreakdown": [ ... ],
-      "sessionsLog": [ ... per-session rows ... ],
-      "trophies": [ ... per-trophy rows ... ]
+      "aliases": [str, ...],
+      "profile":  { ... /api/player — totals, topGames, platformBreakdown,
+                    gameTotal, trophyTotal, platinumTotal, ...;
+                    its sessionsLog/trophies are truncated to one page },
+      "activity": { ... /api/player/activity — full "sessionsLog" },
+      "games":    [ ... /api/player-games — full game library ],
+      "trophies": [ ... /api/player-trophies — full trophy log ]
+                  # absent when the exporter ran with --no-trophies
     }
+
+Legacy snapshots (before the split) are the bare ``/api/player`` response,
+i.e. what is now ``profile``, with complete ``sessionsLog`` and ``trophies``.
 
 All timestamp fields are ISO-8601 UTC strings (``"...Z"``). The aggregator
 itself does not promise unique session ids, so the natural key for
@@ -112,6 +114,41 @@ class PlatformStats:
 
 
 @dataclass(frozen=True, slots=True)
+class GamePlatformTime:
+    """Per-source play time of one game from ``games[].platforms[]``."""
+
+    source: str | None
+    total_duration: timedelta | None
+
+
+@dataclass(frozen=True, slots=True)
+class Game:
+    """One entry of the player's game library (``/api/player-games``).
+
+    Unlike :class:`TopGame`, this covers every game ever played, including
+    lifetime play time imported from the platforms (Steam, PSN, ...) for
+    titles that predate the aggregator's own session tracking.
+    """
+
+    title_id: str
+    title_name: str | None
+    source: str | None
+    """Primary source of the ``title_id``."""
+    sources: tuple[str, ...]
+    """Every source the game was seen on."""
+    total_duration: timedelta | None
+    """Lifetime play time across every source."""
+    observed_duration: timedelta | None
+    """Play time observed by the aggregator's own session tracking."""
+    sessions_count: int | None
+    play_count: int | None
+    last_played_at: datetime | None
+    igdb_game_id: int | None
+    cover_url: str | None
+    platforms: tuple[GamePlatformTime, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class Totals:
     """Top-level aggregate counters."""
 
@@ -122,6 +159,8 @@ class Totals:
     longest_session: timedelta | None
     first_started_at: datetime | None
     last_ended_at: datetime | None
+    active_days: int | None = None
+    """Missing from legacy snapshots."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,7 +168,7 @@ class Summary:
     """Latest-snapshot view of the player's aggregate stats."""
 
     fetched_at_utc: datetime | None
-    """Snapshot file mtime — the aggregator does not stamp its own response."""
+    """``fetched_at`` stamped by the exporter; file mtime for legacy snapshots."""
     name: str | None
     player_name: str | None
     member_count: int | None
@@ -137,6 +176,9 @@ class Summary:
     totals: Totals
     top_games: tuple[TopGame, ...]
     platform_breakdown: tuple[PlatformStats, ...]
+    game_total: int | None = None
+    trophy_total: int | None = None
+    platinum_total: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -279,6 +321,38 @@ def parse_platform_stats(raw: dict[str, Any]) -> PlatformStats:
     )
 
 
+def parse_game(raw: dict[str, Any]) -> Game:
+    if raw.get("title_id") in (None, ""):
+        raise GwmStatsParseError(f"game row missing 'title_id': {raw!r}")
+    sources = raw.get("sources") or []
+    if not isinstance(sources, list) or not all(isinstance(x, str) for x in sources):
+        raise GwmStatsParseError(f"expected list of str for 'sources', got {sources!r}")
+    platforms = raw.get("platforms") or []
+    if not isinstance(platforms, list):
+        raise GwmStatsParseError(f"expected list for 'platforms', got {type(platforms).__name__}")
+    return Game(
+        title_id=str(raw["title_id"]),
+        title_name=_opt_str(raw.get("title_name")),
+        source=_opt_str(raw.get("source")),
+        sources=tuple(sources),
+        total_duration=_parse_seconds(raw.get("total_seconds")),
+        observed_duration=_parse_seconds(raw.get("observed_seconds")),
+        sessions_count=_opt_int(raw.get("sessions")),
+        play_count=_opt_int(raw.get("play_count")),
+        last_played_at=_parse_utc_datetime(raw.get("lastPlayedAt")),
+        igdb_game_id=_opt_int(raw.get("igdb_game_id")),
+        cover_url=_opt_str(raw.get("coverUrl")),
+        platforms=tuple(
+            GamePlatformTime(
+                source=_opt_str(p.get("source")),
+                total_duration=_parse_seconds(p.get("total_seconds")),
+            )
+            for p in platforms
+            if isinstance(p, dict)
+        ),
+    )
+
+
 def parse_totals(raw: dict[str, Any] | None) -> Totals:
     if not raw:
         return Totals(None, None, None, None, None, None, None)
@@ -290,10 +364,13 @@ def parse_totals(raw: dict[str, Any] | None) -> Totals:
         longest_session=_parse_seconds(raw.get("longest_session_seconds")),
         first_started_at=_parse_utc_datetime(raw.get("first_started_at")),
         last_ended_at=_parse_utc_datetime(raw.get("last_ended_at")),
+        active_days=_opt_int(raw.get("active_days")),
     )
 
 
 __all__ = [
+    "Game",
+    "GamePlatformTime",
     "GwmStatsParseError",
     "PlatformStats",
     "Session",
@@ -301,6 +378,7 @@ __all__ = [
     "TopGame",
     "Totals",
     "Trophy",
+    "parse_game",
     "parse_platform_stats",
     "parse_session",
     "parse_top_game",

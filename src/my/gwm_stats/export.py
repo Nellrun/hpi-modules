@@ -2,8 +2,10 @@
 Parser for ``gwm-stats-export`` snapshot files.
 
 Each run of the harvester ``gwm_stats`` exporter writes one JSON file
-(``<harvester_root>/gwm_stats/<timestamp>.json``) containing the full
-``/api/player`` response.
+(``<harvester_root>/gwm_stats/<timestamp>.json``). Both the current
+envelope (``profile``/``activity``/``games``/``trophies``) and legacy
+bare ``/api/player`` snapshots are understood — see
+:mod:`my.gwm_stats.common` for the shapes.
 
 * :func:`sessions` merges ``sessionsLog`` across every snapshot, deduped
   by ``(title_id, started_at, source)``. The aggregator may rewrite a
@@ -11,6 +13,7 @@ Each run of the harvester ``gwm_stats`` exporter writes one JSON file
   so newer snapshots win.
 * :func:`trophies` does the same for ``trophies[]``, deduped by
   ``(source, np_comm_id, trophy_id)``.
+* :func:`games` returns the game library from the latest snapshot.
 * :func:`summary` returns the latest-snapshot view of the aggregate
   fields (``totals``, ``topGames``, ``platformBreakdown``).
 
@@ -39,21 +42,23 @@ Self-check::
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Hashable, Iterator, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 from my.core import Res, Stats, make_logger, stat
 from my.harvester import snapshot
 
 from .common import (
+    Game,
     GwmStatsParseError,
     PlatformStats,
     Session,
     Summary,
     TopGame,
     Trophy,
+    parse_game,
     parse_platform_stats,
     parse_session,
     parse_top_game,
@@ -63,6 +68,8 @@ from .common import (
 
 logger = make_logger(__name__)
 
+
+_T = TypeVar("_T")
 
 _DEFAULT_SOURCE = "gwm_stats"
 _SNAPSHOT_EXTENSIONS = (".json",)
@@ -107,9 +114,6 @@ def _latest() -> Path:
 try:
     from my.core.cachew import mcachew
 except ImportError:  # pragma: no cover - cachew is optional
-    from collections.abc import Callable
-    from typing import TypeVar
-
     _F = TypeVar("_F", bound=Callable[..., Any])
 
     def mcachew(*_args: Any, **_kwargs: Any) -> Callable[[_F], _F]:  # type: ignore[no-redef]
@@ -151,8 +155,89 @@ def _read_snapshot(path: Path) -> dict[str, Any] | Exception:
     return raw
 
 
-def _fetched_at(path: Path) -> datetime:
+def _profile(raw: dict[str, Any]) -> dict[str, Any]:
+    """The ``/api/player`` part of a snapshot: ``profile`` in the current
+    envelope, the whole document in legacy snapshots."""
+    if "profile" not in raw:
+        return raw
+    profile = raw["profile"]
+    return profile if isinstance(profile, dict) else {}
+
+
+def _session_rows(raw: dict[str, Any]) -> Any:
+    # /api/player/activity carries the full log; profile's copy is one page.
+    activity = raw.get("activity")
+    if isinstance(activity, dict) and "sessionsLog" in activity:
+        return activity["sessionsLog"]
+    return _profile(raw).get("sessionsLog")
+
+
+def _trophy_rows(raw: dict[str, Any]) -> Any:
+    # Root ``trophies`` is the full log in both layouts. When the exporter
+    # skipped it (--no-trophies), fall back to profile's first page.
+    if "trophies" in raw:
+        return raw["trophies"]
+    return _profile(raw).get("trophies")
+
+
+def _fetched_at(path: Path, raw: dict[str, Any]) -> datetime:
+    value = raw.get("fetched_at")
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            logger.warning(f"{path}: bad fetched_at {value!r}; using file mtime")
+        else:
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc)
     return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+
+
+def _merge_rows(
+    field: str,
+    extract: Callable[[dict[str, Any]], Any],
+    parser: Callable[[dict[str, Any]], _T],
+    key: Callable[[_T], Hashable],
+) -> tuple[list[Exception], list[_T]]:
+    """Parse ``extract(snapshot)`` rows across every snapshot, deduped by
+    ``key``. Newer snapshots win."""
+    # Iterate newest → oldest so the first row we accept for a given key is
+    # already the freshest version.
+    snaps = list(reversed(list(inputs())))
+    seen: dict[Hashable, _T] = {}
+    errors: list[Exception] = []
+
+    for snap_path in snaps:
+        raw = _read_snapshot(snap_path)
+        if isinstance(raw, Exception):
+            errors.append(raw)
+            continue
+        rows = extract(raw) or []
+        if not isinstance(rows, list):
+            errors.append(
+                GwmStatsParseError(
+                    f"{snap_path}: '{field}' must be a list, got {type(rows).__name__}"
+                )
+            )
+            continue
+        for idx, entry in enumerate(rows):
+            if not isinstance(entry, dict):
+                errors.append(
+                    GwmStatsParseError(
+                        f"{snap_path}: {field}[{idx}] is {type(entry).__name__}, expected object"
+                    )
+                )
+                continue
+            try:
+                item = parser(entry)
+            except Exception as e:
+                logger.exception(f"{snap_path}: {field}[{idx}] failed to parse")
+                errors.append(e)
+                continue
+            seen.setdefault(key(item), item)
+
+    return errors, list(seen.values())
 
 
 # ---------------------------------------------------------------------------
@@ -168,46 +253,14 @@ def sessions() -> Iterator[Res[Session]]:
     Newer snapshots win: subsequent scrapes replace the stored version of
     a session. Output order: chronological by ``started_at``.
     """
-    # Iterate newest → oldest so the first row we accept for a given key is
-    # already the freshest version.
-    snaps = list(reversed(list(inputs())))
-    seen: dict[tuple[str, datetime, str], Session] = {}
-    errors: list[Exception] = []
-
-    for snap_path in snaps:
-        raw = _read_snapshot(snap_path)
-        if isinstance(raw, Exception):
-            errors.append(raw)
-            continue
-        rows = raw.get("sessionsLog") or []
-        if not isinstance(rows, list):
-            errors.append(
-                GwmStatsParseError(
-                    f"{snap_path}: 'sessionsLog' must be a list, "
-                    f"got {type(rows).__name__}"
-                )
-            )
-            continue
-        for idx, entry in enumerate(rows):
-            if not isinstance(entry, dict):
-                errors.append(
-                    GwmStatsParseError(
-                        f"{snap_path}: sessionsLog[{idx}] is "
-                        f"{type(entry).__name__}, expected object"
-                    )
-                )
-                continue
-            try:
-                session = parse_session(entry)
-            except Exception as e:  # noqa: BLE001 — surface every parse failure
-                logger.exception(f"{snap_path}: sessionsLog[{idx}] failed to parse")
-                errors.append(e)
-                continue
-            key = (session.title_id, session.started_at, session.source)
-            seen.setdefault(key, session)
-
+    errors, rows = _merge_rows(
+        "sessionsLog",
+        _session_rows,
+        parse_session,
+        lambda s: (s.title_id, s.started_at, s.source),
+    )
     yield from errors
-    yield from sorted(seen.values(), key=lambda s: (s.started_at, s.title_id))
+    yield from sorted(rows, key=lambda s: (s.started_at, s.title_id))
 
 
 # ---------------------------------------------------------------------------
@@ -223,44 +276,15 @@ def trophies() -> Iterator[Res[Trophy]]:
     Output order: by ``earned_at`` ascending; trophies with no
     ``earned_at`` sort last for determinism.
     """
-    snaps = list(reversed(list(inputs())))
-    seen: dict[tuple[str, str | None, int | None], Trophy] = {}
-    errors: list[Exception] = []
-
-    for snap_path in snaps:
-        raw = _read_snapshot(snap_path)
-        if isinstance(raw, Exception):
-            errors.append(raw)
-            continue
-        rows = raw.get("trophies") or []
-        if not isinstance(rows, list):
-            errors.append(
-                GwmStatsParseError(
-                    f"{snap_path}: 'trophies' must be a list, got {type(rows).__name__}"
-                )
-            )
-            continue
-        for idx, entry in enumerate(rows):
-            if not isinstance(entry, dict):
-                errors.append(
-                    GwmStatsParseError(
-                        f"{snap_path}: trophies[{idx}] is "
-                        f"{type(entry).__name__}, expected object"
-                    )
-                )
-                continue
-            try:
-                trophy = parse_trophy(entry)
-            except Exception as e:  # noqa: BLE001
-                logger.exception(f"{snap_path}: trophies[{idx}] failed to parse")
-                errors.append(e)
-                continue
-            key = (trophy.source, trophy.np_comm_id, trophy.trophy_id)
-            seen.setdefault(key, trophy)
-
+    errors, rows = _merge_rows(
+        "trophies",
+        _trophy_rows,
+        parse_trophy,
+        lambda t: (t.source, t.np_comm_id, t.trophy_id),
+    )
     yield from errors
     yield from sorted(
-        seen.values(),
+        rows,
         key=lambda t: (
             t.earned_at is None,
             t.earned_at or datetime.min.replace(tzinfo=timezone.utc),
@@ -271,7 +295,7 @@ def trophies() -> Iterator[Res[Trophy]]:
 
 
 # ---------------------------------------------------------------------------
-# Summary (latest snapshot only)
+# Latest-snapshot views
 # ---------------------------------------------------------------------------
 
 
@@ -284,8 +308,7 @@ def _parse_list_field(
     rows = raw.get(key) or []
     if not isinstance(rows, list):
         logger.warning(
-            f"{snap_path}: '{key}' must be a list, got {type(rows).__name__}; "
-            f"treating as empty"
+            f"{snap_path}: '{key}' must be a list, got {type(rows).__name__}; treating as empty"
         )
         return ()
     out = []
@@ -300,6 +323,32 @@ def _parse_list_field(
     return tuple(out)
 
 
+def _latest_snapshot() -> tuple[Path, dict[str, Any]]:
+    path = _latest()
+    raw = _read_snapshot(path)
+    if isinstance(raw, Exception):
+        raise raw
+    return path, raw
+
+
+@mcachew(depends_on=_latest_cache_key)
+def games() -> Iterator[Game]:
+    """The game library from the latest snapshot, most played first.
+
+    The library is cumulative, so older snapshots add nothing. Empty for
+    legacy snapshots, which predate ``/api/player-games``. Raises
+    :class:`FileNotFoundError` if no snapshot exists yet.
+    """
+    path, raw = _latest_snapshot()
+    rows: tuple[Game, ...] = _parse_list_field(raw, "games", parse_game, path)
+    yield from rows
+
+
+def _opt_int_field(raw: dict[str, Any], key: str) -> int | None:
+    value = raw.get(key)
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
 @mcachew(depends_on=_latest_cache_key)
 def summary() -> Summary:
     """Latest-snapshot view of the aggregate stats.
@@ -307,30 +356,30 @@ def summary() -> Summary:
     Raises :class:`FileNotFoundError` if no snapshot exists yet — same
     contract as :func:`my.ps_timetracker.export.library`.
     """
-    path = _latest()
-    raw = _read_snapshot(path)
-    if isinstance(raw, Exception):
-        raise raw
+    path, raw = _latest_snapshot()
+    profile = _profile(raw)
 
-    top_games: tuple[TopGame, ...] = _parse_list_field(raw, "topGames", parse_top_game, path)
+    top_games: tuple[TopGame, ...] = _parse_list_field(profile, "topGames", parse_top_game, path)
     platforms: tuple[PlatformStats, ...] = _parse_list_field(
-        raw, "platformBreakdown", parse_platform_stats, path
+        profile, "platformBreakdown", parse_platform_stats, path
     )
 
     return Summary(
-        fetched_at_utc=_fetched_at(path),
-        name=raw.get("name") if isinstance(raw.get("name"), str) else None,
-        player_name=raw.get("playerName")
-        if isinstance(raw.get("playerName"), str)
+        fetched_at_utc=_fetched_at(path, raw),
+        name=profile.get("name") if isinstance(profile.get("name"), str) else None,
+        player_name=profile.get("playerName")
+        if isinstance(profile.get("playerName"), str)
         else None,
-        member_count=raw.get("memberCount")
-        if isinstance(raw.get("memberCount"), int)
-        and not isinstance(raw.get("memberCount"), bool)
-        else None,
-        is_self=raw.get("isSelf") if isinstance(raw.get("isSelf"), bool) else None,
-        totals=parse_totals(raw.get("totals") if isinstance(raw.get("totals"), dict) else None),
+        member_count=_opt_int_field(profile, "memberCount"),
+        is_self=profile.get("isSelf") if isinstance(profile.get("isSelf"), bool) else None,
+        totals=parse_totals(
+            profile.get("totals") if isinstance(profile.get("totals"), dict) else None
+        ),
         top_games=top_games,
         platform_breakdown=platforms,
+        game_total=_opt_int_field(profile, "gameTotal"),
+        trophy_total=_opt_int_field(profile, "trophyTotal"),
+        platinum_total=_opt_int_field(profile, "platinumTotal"),
     )
 
 
@@ -350,11 +399,13 @@ def stats() -> Stats:
     return {
         **stat(sessions),
         **stat(trophies),
+        **stat(games),
         "summary": _summary_size(),
     }
 
 
 __all__ = [
+    "games",
     "inputs",
     "sessions",
     "stats",
